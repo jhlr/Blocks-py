@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from blocks import Block
+from blocks import Block, parse_python
 
 
 # Each case: (name, build_fn, list_of_argstates, js_safe).
@@ -105,6 +105,17 @@ def _nested_expr_chaining(b: Block) -> None:
 	b.return_(b.r)
 
 
+def _empty_bodies(b: Block) -> None:
+	# empty block bodies must still generate valid target code
+	b.r = 0
+	with b.if_(b.x > 0):
+		pass
+	loop = b.while_(b.x > 100)
+	with loop:
+		pass
+	b.return_(b.r)
+
+
 def _return_in_loop_runs_finally(b: Block) -> None:
 	t = b.try_()
 	with t:
@@ -128,7 +139,79 @@ CASES: List[Case] = [
 	("subscript_and_attr", _subscript_and_attr, [{"items": [42, 1], "word": "hi"}], False),
 	("list_dict_literals", _list_dict_literals, [{"x": 3}], True),
 	("nested_expr_chaining", _nested_expr_chaining, [{"x": 4}, {"x": -2}], True),
+	("empty_bodies", _empty_bodies, [{"x": 5}, {"x": -1}], True),
 	("return_in_loop_runs_finally", _return_in_loop_runs_finally, [{"n": 5, "stop": 2}, {"n": 5, "stop": 99}], True),
+]
+
+
+# ---------------------------------------------------------------------------
+# Source-level cases: parse REAL Python -> Block, then check that interpreting,
+# compiling to Python, running the original Python, and (when portable) running
+# the JavaScript backend all return the same value.
+# Each case: (name, source, argstates, js_safe). Source is a single `def`.
+# ---------------------------------------------------------------------------
+SourceCase = Tuple[str, str, List[Dict[str, Any]], bool]
+
+SOURCE_CASES: List[SourceCase] = [
+	("sum_even_odd", """
+def sum_even_odd(n, base=0):
+    total = base
+    for i in range(1, n + 1):
+        if i % 2 == 0:
+            total += i * 2
+        else:
+            total += i
+    return total
+""", [{"n": 5}, {"n": 6, "base": 100}, {"n": 0}], True),
+
+	("classify", """
+def classify(x, y):
+    if x < 0 and y < 0:
+        return -1
+    elif x == 0 or y == 0:
+        return 0
+    else:
+        return 1
+""", [{"x": -2, "y": -3}, {"x": 0, "y": 9}, {"x": 4, "y": 5}], True),
+
+	("countdown", """
+def countdown(n):
+    acc = 0
+    i = 0
+    while i < n:
+        i += 1
+        if i == 3:
+            continue
+        if i == 7:
+            break
+        acc += i
+    return acc
+""", [{"n": 10}, {"n": 2}], True),
+
+	("pow_mod", """
+def pow_mod(a, b, m):
+    return (a ** b) % m
+""", [{"a": 3, "b": 4, "m": 7}, {"a": 2, "b": 10, "m": 100}], True),
+
+	# try/except with a Python-specific exception type; division by zero throws
+	# in Python but not JS -> not cross-checked against node.
+	("safe_div", """
+def safe_div(x, d):
+    try:
+        r = x / d
+    except ZeroDivisionError:
+        r = -1
+    finally:
+        pass
+    return r
+""", [{"x": 10, "d": 2}, {"x": 10, "d": 0}], False),
+
+	("build_struct", """
+def build_struct(x):
+    pair = [x, x + 1]
+    mapping = {"lo": x, "hi": x * 10}
+    return mapping["hi"] + pair[0]
+""", [{"x": 3}, {"x": 0}], True),
 ]
 
 
@@ -226,6 +309,62 @@ def run() -> int:
 	return failures
 
 
+def _run_js_return(source: str, fn_name: str, argstate: Dict[str, Any]) -> Any:
+	"""Run compiled JS and return only state['return']."""
+	return _run_js(source, fn_name, argstate).get("return")
+
+
+def run_source() -> int:
+	"""Validate the Python front-end: real Python source through every backend."""
+	failures = 0
+	node = shutil.which("node")
+	js_checked = 0
+
+	for name, source, argstates, js_safe in SOURCE_CASES:
+		block = parse_python(source)
+		compiled, _ = block.compile(f"cf_{name}")
+		js_source = block.compile_js(f"cf_{name}") if (node and js_safe) else None
+
+		# reference: the original Python, executed for real
+		real_ns: Dict[str, Any] = {}
+		exec(source, real_ns)
+		real_fn = real_ns[name]
+
+		for argstate in argstates:
+			expected = real_fn(**argstate)
+			got_interp = block(dict(argstate)).get("return")
+			got_compile = compiled(dict(argstate)).get("return")
+
+			results = {"real": expected, "interpret": got_interp, "compile": got_compile}
+			if js_source is not None:
+				results["js"] = _run_js_return(js_source, f"cf_{name}", argstate)
+
+			distinct = {json.dumps(v, sort_keys=True) for v in results.values()}
+			if len(distinct) != 1:
+				failures += 1
+				print(f"FAIL {name} on {argstate}")
+				for k, v in results.items():
+					print(f"  {k:10}: {v}")
+			else:
+				tag = "==".join(results.keys())
+				print(f"ok   {name} {argstate} ({tag})")
+				if js_source is not None:
+					js_checked += 1
+
+	total = sum(len(c[2]) for c in SOURCE_CASES)
+	if failures:
+		print(f"\n{failures} source-level divergence(s) detected")
+	else:
+		print(f"\nall {total} source checks passed across {len(SOURCE_CASES)} "
+			  f"Python programs — parse -> interpret/compile matches real Python; "
+			  f"{js_checked} also verified against the JavaScript backend")
+	return failures
+
+
 if __name__ == "__main__":
 	import sys
-	sys.exit(1 if run() else 0)
+	print("=== AST-level: builder vs backends ===")
+	f1 = run()
+	print("\n=== Source-level: real Python -> backends ===")
+	f2 = run_source()
+	sys.exit(1 if (f1 + f2) else 0)

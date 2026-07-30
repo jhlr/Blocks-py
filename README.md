@@ -19,9 +19,13 @@ with b.for_(b.range(1, b.n + 1), var="i") as loop:
 b.return_(b.total)
 ```
 
-O truque: `b.x` devolve um proxy simbólico, e os operadores (`+`, `<`, `==`, ...)
-e os *context managers* (`if_`, `for_`, `while_`, `try_`) montam nós da árvore em
-vez de rodar. Depois você escolhe o que fazer com ela.
+O truque: `b.x` devolve uma **expressão simbólica** (`VarExpr`), e os operadores
+(`+`, `<`, `==`, `%`, `**`, ...) e os *context managers* (`if_`, `for_`,
+`while_`, `try_`) montam nós da árvore em vez de rodar. Depois você escolhe o que
+fazer com ela.
+
+Se preferir não usar o builder, dá pra **parsear Python de verdade** direto pra
+mesma árvore (veja "Front-end" abaixo) — inclusive traduzindo Python → JavaScript.
 
 ## Quatro modos, o mesmo programa
 
@@ -43,6 +47,43 @@ js = b.compile_js("soma")          # string com o código JS
 b.export_js("soma.js", fn_name="soma")   # módulo CommonJS autônomo (Node/browser)
 ```
 
+## Front-end: Python de verdade → AST (e daí pra JavaScript)
+
+Além do builder, dá pra **parsear um subset de Python real** direto pra mesma
+árvore, via `ast` da stdlib. Como o resultado é um `Block`, todos os backends
+funcionam — então isto é **tradução source-to-source Python → JavaScript** de
+verdade para o subset suportado.
+
+```python
+from blocks import parse_python
+
+b = parse_python('''
+def soma(n, base=0):
+    total = base
+    for i in range(1, n + 1):
+        if i % 2 == 0:
+            total += i * 2
+        else:
+            total += i
+    return total
+''')
+
+b({"n": 5})["return"]        # 21  (interpretado)
+b.compile("soma")            # função Python
+print(b.compile_js("soma"))  # o MESMO programa em JavaScript
+```
+
+Um `def` de topo vira o bloco (defaults constantes viram prestate); ou passe
+statements soltos. **Subset suportado:** assign a nome simples, `+=`, anotações,
+`return`, `pass`, `break`/`continue`, `if/elif/else`, `for` (alvo nome simples),
+`while`, `try/except/finally`; expressões: constantes, nomes, `+ - not`,
+`+ - * / % **`, `and`/`or` (n-ário), comparações (incl. encadeadas com operando
+do meio sem efeito colateral), chamadas (posicional + keyword), `range()`,
+atributo, subscrito (índice, sem slice), literais list/tuple/dict.
+
+Qualquer coisa fora do subset levanta `UnsupportedSyntaxError` **com número da
+linha** — o parser nunca traduz errado calado.
+
 ## O que tem dentro
 
 - **Builder simbólico** — atribuição vira `AssignNode`, operadores viram `BinOpExpr`,
@@ -50,6 +91,9 @@ b.export_js("soma.js", fn_name="soma")   # módulo CommonJS autônomo (Node/brow
   Os operadores vivem no próprio `Expr`, então **toda** expressão compõe:
   `(b.x + 1) * 2`, `b.items[0]`, `b.obj.attr("campo").call()`, `[b.x, b.y]`,
   `{"k": b.v}`, e `b.total += b.i` (o `+=` cai de graça no `AssignNode`).
+- **Front-end de Python real** — `parse_python()` faz *lowering* de um subset de
+  Python (via `ast` da stdlib) para a mesma AST; falha alto (com linha) fora do
+  subset. É o que habilita a tradução Python → JavaScript.
 - **AST tipada** — expressões (`Expr`) e comandos (`Node`) como `dataclass`es com `slots`.
 - **Interpretador** — `eval_expr` / `exec_nodes`, com controle de fluxo por exceções
   internas (`BlockReturn`, `LoopBreak`, `LoopContinue`).
@@ -104,9 +148,12 @@ O harness só cross-checa contra o `node` os programas marcados como portáveis.
 ## Testes
 
 ```bash
-python test_blocks.py   # sem deps; roda interpretador vs compilador Python,
-                        # e (se `node` existir) o JS gerado vs o interpretador.
-                        # Sai != 0 se qualquer backend divergir.
+python test_blocks.py   # sem deps. Dois níveis:
+                        #  1) AST-level: builder -> interpretador vs compilador Python
+                        #  2) source-level: parse_python -> interpretar/compilar
+                        #     comparado ao Python REAL executado (exec).
+                        # Em ambos, se `node` existir, o JS gerado roda e é
+                        # comparado também. Sai != 0 se qualquer backend divergir.
 ```
 
 ## Fora do escopo (por ora)
