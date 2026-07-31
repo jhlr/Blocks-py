@@ -206,6 +206,19 @@ def safe_div(x, d):
     return r
 """, [{"x": 10, "d": 2}, {"x": 10, "d": 0}], False),
 
+	# `except ... as e` binds the caught exception into the state (Python-only:
+	# division by zero doesn't throw in JS/Lua).
+	("except_bind", """
+def except_bind(x, d):
+    caught = 0
+    try:
+        r = x / d
+    except ZeroDivisionError as e:
+        r = -1
+        caught = 1
+    return [r, caught]
+""", [{"x": 10, "d": 2}, {"x": 10, "d": 0}], False),
+
 	("build_struct", """
 def build_struct(x):
     pair = [x, x + 1]

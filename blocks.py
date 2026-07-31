@@ -313,6 +313,7 @@ class WhileNode(Node):
 class ExceptNode(Node):
 	exc_type: Union[type, Tuple[type, ...]]
 	body: List[Node] = field(default_factory=list)
+	name: Optional[str] = None  # `except T as name:` binds the caught value
 
 
 @dataclass(slots=True)
@@ -516,6 +517,8 @@ def exec_nodes(nodes: List[Node], state: Dict[str, Any]) -> None:
 				handled = False
 				for ex in node.excepts:
 					if isinstance(e, ex.exc_type):
+						if ex.name is not None:
+							state[ex.name] = e
 						exec_nodes(ex.body, state)
 						handled = True
 						break
@@ -788,6 +791,8 @@ def _gen_nodes(nodes: List[Node], ctx: _CodegenContext) -> None:
 					keyword = "if" if i == 0 else "elif"
 					ctx.add_line(f"{keyword} isinstance({e_name}, {cond_src}):")
 					ctx.indent += 1
+					if ex.name is not None:
+						ctx.add_line(f"state[{ex.name!r}] = {e_name}")
 					_gen_nodes(ex.body, ctx)
 					ctx.add_line(f"{handled_name} = True")
 					ctx.indent -= 1
@@ -818,6 +823,8 @@ def _gen_nodes(nodes: List[Node], ctx: _CodegenContext) -> None:
 					keyword = "if" if i == 0 else "elif"
 					ctx.add_line(f"{keyword} isinstance({e_name}, {cond_src}):")
 					ctx.indent += 1
+					if ex.name is not None:
+						ctx.add_line(f"state[{ex.name!r}] = {e_name}")
 					_gen_nodes(ex.body, ctx)
 					ctx.add_line(f"{handled_name} = True")
 					ctx.indent -= 1
@@ -1077,6 +1084,8 @@ def _gen_js(nodes: List[Node], ctx: _CodegenContext) -> None:
 					keyword = "if" if i == 0 else "} else if"
 					ctx.add_line(f"{keyword} ({cond}) {{")
 					ctx.indent += 1
+					if ex.name is not None:
+						ctx.add_line(f"state[{json.dumps(ex.name)}] = {e_name};")
 					_gen_js(ex.body, ctx)
 					ctx.indent -= 1
 				ctx.add_line("} else {")
@@ -1460,6 +1469,8 @@ def _gen_lua(nodes: List[Node], ctx: _CodegenContext) -> None:
 					keyword = "if" if i == 0 else "elseif"
 					ctx.add_line(f"{keyword} {cond} then")
 					ctx.indent += 1
+					if ex.name is not None:
+						ctx.add_line(f"state[{_lua_literal(ex.name)}] = {err}")
 					_gen_lua(ex.body, ctx)
 					ctx.add_line(f"{handled} = true")
 					ctx.indent -= 1
@@ -1678,8 +1689,9 @@ class Block:
 		def __exit__(self, exc_type, exc, tb):
 			self.block._stack.pop()
 
-		def except_(self, exc_type: Union[type, Tuple[type, ...]]) -> "Block._ExceptBuilder":
-			enode = ExceptNode(exc_type=exc_type)
+		def except_(self, exc_type: Union[type, Tuple[type, ...]],
+					name: Optional[str] = None) -> "Block._ExceptBuilder":
+			enode = ExceptNode(exc_type=exc_type, name=name)
 			self.node.excepts.append(enode)
 			return Block._ExceptBuilder(self.block, self.node, enode)
 
@@ -2096,10 +2108,8 @@ def _lower_try(s: _ast.Try) -> TryNode:
 		raise UnsupportedSyntaxError(s, "try-else is not supported")
 	node = TryNode(body=_lower_stmts(s.body))
 	for h in s.handlers:
-		if h.name:
-			raise UnsupportedSyntaxError(h, "'except ... as name' is not supported")
 		node.excepts.append(ExceptNode(exc_type=_resolve_exc_type(h.type),
-									   body=_lower_stmts(h.body)))
+									   body=_lower_stmts(h.body), name=h.name))
 	if s.finalbody:
 		node.finally_body = _lower_stmts(s.finalbody)
 	return node
@@ -2692,10 +2702,12 @@ class _JsParser:
 		self._eat("KEYWORD", "try")
 		node = TryNode(body=self._parse_block())
 		if self._accept("KEYWORD", "catch"):
-			if self._accept("PUNCT", "("):  # optional binding, ignored
-				self._eat("NAME")
+			catch_name: Optional[str] = None
+			if self._accept("PUNCT", "("):  # optional binding
+				catch_name = self._eat("NAME")[1]
 				self._eat("PUNCT", ")")
-			node.excepts.append(ExceptNode(exc_type=Exception, body=self._parse_block()))
+			node.excepts.append(ExceptNode(exc_type=Exception,
+										   body=self._parse_block(), name=catch_name))
 		if self._accept("KEYWORD", "finally"):
 			node.finally_body = self._parse_block()
 		return node
