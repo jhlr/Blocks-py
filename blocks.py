@@ -203,6 +203,31 @@ class DictExpr(Expr):
 	values: List[Expr] = field(default_factory=list)
 
 
+@dataclass(slots=True, eq=False)
+class CondExpr(Expr):
+	"""Conditional expression: then if cond else orelse (JS: cond ? then : orelse).
+
+	Only the taken branch is evaluated (short-circuit).
+	"""
+	cond: Expr
+	then: Expr
+	orelse: Expr
+
+
+@dataclass(slots=True, eq=False)
+class SliceExpr(Expr):
+	"""A slice used as a subscript index: obj[lower:upper:step]."""
+	lower: Optional[Expr] = None
+	upper: Optional[Expr] = None
+	step: Optional[Expr] = None
+
+
+@dataclass(slots=True, eq=False)
+class ConcatExpr(Expr):
+	"""String concatenation of stringified parts (f-strings, template literals)."""
+	parts: List[Expr] = field(default_factory=list)
+
+
 ###############################################################################
 # Statement AST
 ###############################################################################
@@ -358,6 +383,12 @@ def eval_expr(expr: Expr, state: Dict[str, Any]) -> Any:
 	if isinstance(expr, IndexExpr):
 		return eval_expr(expr.obj, state)[eval_expr(expr.index, state)]
 
+	if isinstance(expr, SliceExpr):
+		lower = eval_expr(expr.lower, state) if expr.lower is not None else None
+		upper = eval_expr(expr.upper, state) if expr.upper is not None else None
+		step = eval_expr(expr.step, state) if expr.step is not None else None
+		return slice(lower, upper, step)
+
 	if isinstance(expr, AttrExpr):
 		return getattr(eval_expr(expr.obj, state), expr.name)
 
@@ -368,7 +399,20 @@ def eval_expr(expr: Expr, state: Dict[str, Any]) -> Any:
 		return {eval_expr(k, state): eval_expr(v, state)
 				for k, v in zip(expr.keys, expr.values)}
 
+	if isinstance(expr, CondExpr):
+		if eval_expr(expr.cond, state):
+			return eval_expr(expr.then, state)
+		return eval_expr(expr.orelse, state)
+
+	if isinstance(expr, ConcatExpr):
+		return "".join(_pystr(eval_expr(p, state)) for p in expr.parts)
+
 	raise TypeError(f"Unknown Expr type: {expr!r}")
+
+
+def _pystr(v: Any) -> str:
+	"""Stringify a value for concatenation, matching str() but with '' for None-ish."""
+	return str(v)
 
 
 ###############################################################################
@@ -516,6 +560,21 @@ class _CodegenContext:
 			self.exc_types.append(t)
 
 
+def _slice_to_source(sl: SliceExpr) -> str:
+	lo = _expr_to_source(sl.lower) if sl.lower is not None else ""
+	up = _expr_to_source(sl.upper) if sl.upper is not None else ""
+	if sl.step is not None:
+		return f"{lo}:{up}:{_expr_to_source(sl.step)}"
+	return f"{lo}:{up}"
+
+
+def _concat_part_to_source(part: Expr) -> str:
+	# literal string segments emit verbatim; everything else is str()-wrapped
+	if isinstance(part, LiteralExpr) and isinstance(part.value, str):
+		return repr(part.value)
+	return f"str({_expr_to_source(part)})"
+
+
 def _expr_to_source(expr: Expr) -> str:
 	if isinstance(expr, LiteralExpr):
 		return repr(expr.value)
@@ -537,7 +596,14 @@ def _expr_to_source(expr: Expr) -> str:
 		right = _expr_to_source(expr.right)
 		return f"({left} {symbol} {right})"
 	if isinstance(expr, IndexExpr):
+		if isinstance(expr.index, SliceExpr):
+			return f"({_expr_to_source(expr.obj)})[{_slice_to_source(expr.index)}]"
 		return f"({_expr_to_source(expr.obj)})[{_expr_to_source(expr.index)}]"
+	if isinstance(expr, CondExpr):
+		return (f"({_expr_to_source(expr.then)} if {_expr_to_source(expr.cond)}"
+				f" else {_expr_to_source(expr.orelse)})")
+	if isinstance(expr, ConcatExpr):
+		return "(" + " + ".join(_concat_part_to_source(p) for p in expr.parts) + ")"
 	if isinstance(expr, AttrExpr):
 		obj_src = _expr_to_source(expr.obj)
 		if expr.name.isidentifier():
@@ -827,7 +893,30 @@ const _range = (start, stop, step) => {
   return out;
 };
 const _matches = (e, name) => !!e && (e.name === name || (e.constructor && e.constructor.name === name));
+const _slice = (seq, start, stop, step) => {
+  const isStr = typeof seq === "string";
+  const n = seq.length;
+  step = (step === null || step === undefined) ? 1 : step;
+  let lo, hi;
+  if (step > 0) {
+    lo = (start === null || start === undefined) ? 0 : (start < 0 ? Math.max(0, n + start) : Math.min(n, start));
+    hi = (stop === null || stop === undefined) ? n : (stop < 0 ? Math.max(0, n + stop) : Math.min(n, stop));
+  } else {
+    lo = (start === null || start === undefined) ? n - 1 : (start < 0 ? Math.max(-1, n + start) : Math.min(n - 1, start));
+    hi = (stop === null || stop === undefined) ? -1 : (stop < 0 ? Math.max(-1, n + stop) : Math.min(n - 1, stop));
+  }
+  const out = [];
+  if (step > 0) { for (let i = lo; i < hi; i += step) out.push(seq[i]); }
+  else { for (let i = lo; i > hi; i += step) out.push(seq[i]); }
+  return isStr ? out.join("") : out;
+};
 """
+
+
+def _concat_part_to_js(part: Expr) -> str:
+	if isinstance(part, LiteralExpr) and isinstance(part.value, str):
+		return _js_literal(part.value)
+	return f"String({_expr_to_js(part)})"
 
 
 def _js_literal(value: Any) -> str:
@@ -870,7 +959,19 @@ def _expr_to_js(expr: Expr) -> str:
 			raise ValueError(f"Unknown binary op: {expr.op}")
 		return f"({_expr_to_js(expr.left)} {symbol} {_expr_to_js(expr.right)})"
 	if isinstance(expr, IndexExpr):
+		if isinstance(expr.index, SliceExpr):
+			sl = expr.index
+			lo = _expr_to_js(sl.lower) if sl.lower is not None else "null"
+			up = _expr_to_js(sl.upper) if sl.upper is not None else "null"
+			st = _expr_to_js(sl.step) if sl.step is not None else "null"
+			return f"_slice({_expr_to_js(expr.obj)}, {lo}, {up}, {st})"
 		return f"({_expr_to_js(expr.obj)})[{_expr_to_js(expr.index)}]"
+	if isinstance(expr, CondExpr):
+		# raw JS truthiness, matching this backend's if/while (documented divergence)
+		return (f"({_expr_to_js(expr.cond)} ? {_expr_to_js(expr.then)}"
+				f" : {_expr_to_js(expr.orelse)})")
+	if isinstance(expr, ConcatExpr):
+		return "(" + " + ".join(_concat_part_to_js(p) for p in expr.parts) + ")"
 	if isinstance(expr, AttrExpr):
 		obj_src = _expr_to_js(expr.obj)
 		if expr.name.isidentifier():
@@ -1078,7 +1179,46 @@ end
 local function _matches(e, name)
   return type(e) == "table" and e.name == name
 end
+local function _cond(c, afn, bfn)
+  if _truthy(c) then return afn() else return bfn() end
+end
+local function _len(seq)
+  if type(seq) == "string" then return #seq end
+  local n = 0
+  while seq[n] ~= nil do n = n + 1 end
+  return n
+end
+local function _slice(seq, start, stop, step)
+  local isStr = type(seq) == "string"
+  local n = _len(seq)
+  if step == nil then step = 1 end
+  local lo, hi
+  if step > 0 then
+    if start == nil then lo = 0 elseif start < 0 then lo = math.max(0, n + start) else lo = math.min(n, start) end
+    if stop == nil then hi = n elseif stop < 0 then hi = math.max(0, n + stop) else hi = math.min(n, stop) end
+  else
+    if start == nil then lo = n - 1 elseif start < 0 then lo = math.max(-1, n + start) else lo = math.min(n - 1, start) end
+    if stop == nil then hi = -1 elseif stop < 0 then hi = math.max(-1, n + stop) else hi = math.min(n - 1, stop) end
+  end
+  local i = lo
+  if isStr then
+    local parts = {}
+    if step > 0 then while i < hi do parts[#parts + 1] = seq:sub(i + 1, i + 1); i = i + step end
+    else while i > hi do parts[#parts + 1] = seq:sub(i + 1, i + 1); i = i + step end end
+    return table.concat(parts)
+  end
+  local out, k = {}, 0
+  if step > 0 then while i < hi do out[k] = seq[i]; k = k + 1; i = i + step end
+  else while i > hi do out[k] = seq[i]; k = k + 1; i = i + step end end
+  return out
+end
 """
+
+
+def _concat_part_to_lua(part: Expr) -> str:
+	if isinstance(part, LiteralExpr) and isinstance(part.value, str):
+		return _lua_literal(part.value)
+	return f"tostring({_expr_to_lua(part)})"
 
 
 def _lua_literal(value: Any) -> str:
@@ -1131,7 +1271,19 @@ def _expr_to_lua(expr: Expr) -> str:
 			return f"_or({_expr_to_lua(expr.left)}, function() return {_expr_to_lua(expr.right)} end)"
 		raise ValueError(f"Unknown binary op: {expr.op}")
 	if isinstance(expr, IndexExpr):
+		if isinstance(expr.index, SliceExpr):
+			sl = expr.index
+			lo = _expr_to_lua(sl.lower) if sl.lower is not None else "nil"
+			up = _expr_to_lua(sl.upper) if sl.upper is not None else "nil"
+			st = _expr_to_lua(sl.step) if sl.step is not None else "nil"
+			return f"_slice({_expr_to_lua(expr.obj)}, {lo}, {up}, {st})"
 		return f"({_expr_to_lua(expr.obj)})[{_expr_to_lua(expr.index)}]"
+	if isinstance(expr, CondExpr):
+		return (f"_cond({_expr_to_lua(expr.cond)},"
+				f" function() return {_expr_to_lua(expr.then)} end,"
+				f" function() return {_expr_to_lua(expr.orelse)} end)")
+	if isinstance(expr, ConcatExpr):
+		return "(" + " .. ".join(_concat_part_to_lua(p) for p in expr.parts) + ")"
 	if isinstance(expr, AttrExpr):
 		obj_src = _expr_to_lua(expr.obj)
 		if expr.name.isidentifier():
@@ -1890,7 +2042,11 @@ def _lower_expr(node: _ast.expr) -> Expr:
 
 	if isinstance(node, _ast.Subscript):
 		if isinstance(node.slice, _ast.Slice):
-			raise UnsupportedSyntaxError(node, "slices are not supported")
+			sl = node.slice
+			return IndexExpr(_lower_expr(node.value), SliceExpr(
+				_lower_expr(sl.lower) if sl.lower is not None else None,
+				_lower_expr(sl.upper) if sl.upper is not None else None,
+				_lower_expr(sl.step) if sl.step is not None else None))
 		return IndexExpr(_lower_expr(node.value), _lower_expr(node.slice))
 
 	if isinstance(node, (_ast.List, _ast.Tuple)):
@@ -1901,6 +2057,24 @@ def _lower_expr(node: _ast.expr) -> Expr:
 			raise UnsupportedSyntaxError(node, "dict unpacking (**) is not supported")
 		return DictExpr([_lower_expr(k) for k in node.keys],
 						[_lower_expr(v) for v in node.values])
+
+	if isinstance(node, _ast.IfExp):
+		return CondExpr(_lower_expr(node.test), _lower_expr(node.body),
+						_lower_expr(node.orelse))
+
+	if isinstance(node, _ast.JoinedStr):  # f-string
+		parts: List[Expr] = []
+		for v in node.values:
+			if isinstance(v, _ast.Constant):
+				parts.append(LiteralExpr(v.value))
+			elif isinstance(v, _ast.FormattedValue):
+				if v.conversion not in (-1, ord("s")) or v.format_spec is not None:
+					raise UnsupportedSyntaxError(
+						v, "f-string conversions/format specs are not supported")
+				parts.append(_lower_expr(v.value))
+			else:
+				raise UnsupportedSyntaxError(v, "unsupported f-string segment")
+		return ConcatExpr(parts)
 
 	raise UnsupportedSyntaxError(node)
 
@@ -2105,9 +2279,9 @@ class JsSyntaxError(Exception):
 
 # multi-char punctuators first so the tokenizer matches greedily
 _JS_PUNCT = sorted([
-	"===", "!==", "==", "!=", "<=", ">=", "&&", "||", "**",
+	"===", "!==", "==", "!=", "<=", ">=", "&&", "||", "**", "=>",
 	"+=", "-=", "*=", "/=", "%=", "++", "--",
-	"(", ")", "{", "}", "[", "]", ",", ";", ".", ":",
+	"(", ")", "{", "}", "[", "]", ",", ";", ".", ":", "?",
 	"+", "-", "*", "/", "%", "<", ">", "=", "!",
 ], key=len, reverse=True)
 
@@ -2173,6 +2347,43 @@ def _js_tokenize(src: str) -> List[Tuple[str, Any]]:
 			if j >= n:
 				raise JsSyntaxError("unterminated string literal")
 			tokens.append(("STRING", "".join(buf)))
+			i = j + 1
+			continue
+		if c == "`":  # template literal -> parts: ("str", text) | ("expr", source)
+			j = i + 1
+			parts: List[Tuple[str, str]] = []
+			buf = []
+			while j < n and src[j] != "`":
+				if src[j] == "\\" and j + 1 < n:
+					esc = src[j + 1]
+					buf.append({"n": "\n", "t": "\t", "r": "\r", "\\": "\\",
+								"`": "`", "$": "$"}.get(esc, esc))
+					j += 2
+					continue
+				if src[j] == "$" and j + 1 < n and src[j + 1] == "{":
+					parts.append(("str", "".join(buf)))
+					buf = []
+					depth = 1
+					k = j + 2
+					while k < n and depth > 0:
+						if src[k] == "{":
+							depth += 1
+						elif src[k] == "}":
+							depth -= 1
+							if depth == 0:
+								break
+						k += 1
+					if depth != 0:
+						raise JsSyntaxError("unterminated template expression")
+					parts.append(("expr", src[j + 2:k]))
+					j = k + 1
+					continue
+				buf.append(src[j])
+				j += 1
+			if j >= n:
+				raise JsSyntaxError("unterminated template literal")
+			parts.append(("str", "".join(buf)))
+			tokens.append(("TEMPLATE", parts))
 			i = j + 1
 			continue
 		if c.isalpha() or c == "_" or c == "$":
@@ -2245,7 +2456,8 @@ class _JsParser:
 
 	# --- program ---
 	def parse_program(self) -> Tuple[List[Node], Dict[str, Any]]:
-		# a single top-level function declaration, or bare statements
+		# a single top-level function declaration (`function name(){}`), a
+		# top-level arrow function, or bare statements
 		if self._at("KEYWORD", "function") and self._peek(1)[0] == "NAME":
 			self._eat("KEYWORD", "function")
 			self._eat("NAME")
@@ -2253,10 +2465,40 @@ class _JsParser:
 			body = self._parse_block()
 			self._eat("EOF")
 			return body, prestate
+		save = self.i
+		arrow = self._try_toplevel_arrow()
+		if arrow is not None:
+			return arrow
+		self.i = save
 		stmts: List[Node] = []
 		while not self._at("EOF"):
 			stmts.extend(self._statement())
 		return stmts, {}
+
+	def _try_toplevel_arrow(self) -> Optional[Tuple[List[Node], Dict[str, Any]]]:
+		"""Parse `(params) => body` or `x => body` as the whole program.
+
+		Only the top-level arrow form is supported (it maps to the block +
+		prestate, no closures). Inline arrow values are not supported.
+		"""
+		try:
+			if self._at("NAME") and self._peek(1) == ("PUNCT", "=>"):
+				prestate: Dict[str, Any] = {}
+				self._eat("NAME")
+			elif self._at("PUNCT", "("):
+				prestate = self._parse_params()
+			else:
+				return None
+			if not self._accept("PUNCT", "=>"):
+				return None
+			if self._at("PUNCT", "{"):
+				body = self._parse_block()
+			else:
+				body = [ReturnNode(self._expression())]
+			self._eat("EOF")
+			return body, prestate
+		except JsSyntaxError:
+			return None
 
 	def _parse_params(self) -> Dict[str, Any]:
 		prestate: Dict[str, Any] = {}
@@ -2489,7 +2731,19 @@ class _JsParser:
 
 	# --- expressions (precedence climbing) ---
 	def _expression(self) -> Expr:
-		return self._binary(1)
+		expr = self._binary(1)
+		if self._at("PUNCT", "?"):  # ternary cond ? then : orelse
+			self.i += 1
+			then = self._expression()
+			self._eat("PUNCT", ":")
+			orelse = self._expression()
+			return CondExpr(expr, then, orelse)
+		return expr
+
+	def parse_expression_only(self) -> Expr:
+		expr = self._expression()
+		self._eat("EOF")
+		return expr
 
 	def _binary(self, min_prec: int) -> Expr:
 		left = self._unary()
@@ -2553,6 +2807,15 @@ class _JsParser:
 			return LiteralExpr(value)
 		if kind == "STRING":
 			return LiteralExpr(value)
+		if kind == "TEMPLATE":
+			parts: List[Expr] = []
+			for ptype, text in value:
+				if ptype == "str":
+					if text:
+						parts.append(LiteralExpr(text))
+				else:  # embedded ${expr}
+					parts.append(_JsParser(_js_tokenize(text)).parse_expression_only())
+			return ConcatExpr(parts if parts else [LiteralExpr("")])
 		if kind == "NAME":
 			return VarExpr(value)
 		if kind == "KEYWORD":

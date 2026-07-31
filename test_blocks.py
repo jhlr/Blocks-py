@@ -232,6 +232,17 @@ def logic(a, b):
     y = a or b
     return [x, y]
 """, [{"a": 0, "b": 9}, {"a": 5, "b": 0}, {"a": "", "b": "x"}], True),
+
+	# slices (incl. reverse and step), ternary, and f-strings (scalars only)
+	("features", """
+def features(xs, n):
+    head = xs[0:n]
+    rev = xs[::-1]
+    every2 = xs[::2]
+    sign = "pos" if n > 0 else "nonpos"
+    msg = f"sign={sign} n={n} first={xs[0]}"
+    return [head, rev, every2, sign, msg]
+""", [{"xs": [10, 20, 30, 40, 50], "n": 2}, {"xs": [1, 2], "n": 0}], True),
 ]
 
 
@@ -431,12 +442,29 @@ function logic(a, b) {
 """, [{"a": 0, "b": 9}, {"a": 5, "b": 0}]),
 
 	("power", "function power(a, b) { return a ** b; }", [{"a": 2, "b": 10}, {"a": 3, "b": 4}]),
+
+	# ternary, template literals, and a top-level arrow function
+	("ternaryFn", 'function ternaryFn(x) { return x > 0 ? "pos" : (x < 0 ? "neg" : "zero"); }',
+	 [{"x": 5}, {"x": -3}, {"x": 0}]),
+
+	("templateFn", "function templateFn(a, b) { return `sum=${a + b} a=${a} big=${a > b ? \"y\" : \"n\"}`; }",
+	 [{"a": 3, "b": 4}, {"a": 9, "b": 1}]),
+
+	("arrowSum", "(n) => { let s = 0; for (let i = 0; i < n; i++) { s += i; } return s; }",
+	 [{"n": 5}, {"n": 0}]),
+
+	("arrowExpr", "(a, b) => a * b + 1", [{"a": 3, "b": 4}]),
 ]
 
 
 def _run_node_reference(source: str, fn_name: str, argstate: Dict[str, Any]) -> Any:
-	"""Run the ORIGINAL JavaScript function in node with positional args."""
-	driver = (source
+	"""Run the ORIGINAL JavaScript function in node with positional args.
+
+	Named `function` sources are used as-is; a bare arrow/expression source is
+	bound to `fn_name` so it can be called the same way.
+	"""
+	preamble = source if source.strip().startswith("function") else f"const {fn_name} = ({source});"
+	driver = (preamble
 			  + "\nconst __a = JSON.parse(process.argv[2]);"
 			  + f"\nconst __keys = Object.keys(__a);"
 			  + f"\nprocess.stdout.write(JSON.stringify({fn_name}(...__keys.map(k => __a[k]))));")

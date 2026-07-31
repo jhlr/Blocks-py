@@ -85,8 +85,10 @@ statements soltos. **Subset:** assign a nome / subscrito / atributo (`x`, `x[i]`
 `x.a`), `+=` (incl. em subscrito/atributo), anotações, `return`, `pass`,
 `break`/`continue`, `if/elif/else`, `for`, `while`, `try/except/finally`;
 expressões: constantes, nomes, `+ - not`, `+ - * / % **`, `and`/`or` (n-ário),
-comparações (incl. encadeadas sem efeito colateral no meio), chamadas
-(posicional + keyword), `range()`, atributo, subscrito, literais list/tuple/dict.
+comparações (incl. encadeadas sem efeito colateral no meio), **ternário**
+(`a if c else b`), **f-strings** (`f"{x}"`, sem format spec), **slices**
+(`x[a:b:c]`, incl. `x[::-1]`), chamadas (posicional + keyword), `range()`,
+atributo, subscrito, literais list/tuple/dict.
 
 ### `parse_js` (tokenizer + parser próprios) → Python, Lua ou JS
 
@@ -107,17 +109,25 @@ b({"x": 3})["return"]         # 41  (interpretado com semântica Python)
 print(b.compile("dictAccess")[1])   # o MESMO programa em Python
 ```
 
-**Subset:** `function` de topo (defaults viram prestate) ou statements;
-`let/const/var`, assign a nome/índice/membro, `+=`/`-=`/`*=`/`/=`/`%=`, `++`/`--`,
-`return`, `break`/`continue`, `if/else if/else`, `while`, `for-of`, `for` estilo-C
-(contável vira `range`; senão desugar pra `while`), `try/catch/finally`; expressões
-com precedência completa. **Nota-chave:** `obj.prop` e `obj[k]` do JS são acesso a
-propriedade, então mapeiam pra **subscrito** (`obj["prop"]`) — a tradução fiel pra
-`dict` do Python. Métodos em valores (`arr.push`, `s.toUpperCase`) não têm
-equivalente e não portam.
+**Subset:** `function` de topo **ou arrow de topo** (`(a,b) => ...` / `x => e`;
+defaults viram prestate) ou statements; `let/const/var`, assign a nome/índice/
+membro, `+=`/`-=`/`*=`/`/=`/`%=`, `++`/`--`, `return`, `break`/`continue`,
+`if/else if/else`, `while`, `for-of`, `for` estilo-C (contável vira `range`; senão
+desugar pra `while`), `try/catch/finally`; expressões com precedência completa,
+**ternário** (`c ? a : b`) e **template literals** (`` `x=${e}` ``).
+**Nota-chave:** `obj.prop` e `obj[k]` do JS são acesso a propriedade, então mapeiam
+pra **subscrito** (`obj["prop"]`) — a tradução fiel pra `dict` do Python. Arrow
+só na forma de topo (sem closures); métodos em valores (`arr.push`,
+`s.toUpperCase`) não têm equivalente e não portam.
 
 Fora do subset, ambos levantam erro (`UnsupportedSyntaxError` / `JsSyntaxError`)
 — **nunca traduzem errado calado.**
+
+**Divergências de linguagem** (documentadas, não bugs): índice fora dos limites
+(JS `arr[99]` → `undefined`; Python → `IndexError`); `str()`/`String()`/`tostring()`
+de `true`/`None` diferem na capitalização dentro de interpolação; truthiness de
+`[]`/`{}` no backend JS. `[::-1]`, step e índices negativos de slice são fiéis
+(helper `_slice` porta a semântica exata do Python pra JS e Lua).
 
 ## O que tem dentro
 
