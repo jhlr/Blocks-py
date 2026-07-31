@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "blocks-dsl"
+dynamic = ["version"]
+description = "Embedded Python DSL: one AST, four code generators (Python/JavaScript/Lua/Go) and two front-ends (parse_python/parse_js). A source-to-source transpiler."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "jhlr" }]
+keywords = [
+    "dsl", "transpiler", "transpilation", "ast", "codegen",
+    "code-generation", "compiler", "interpreter",
+    "python", "javascript", "lua", "go", "source-to-source",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Software Development :: Code Generators",
+    "Topic :: Software Development :: Compilers",
+    "Topic :: Software Development :: Interpreters",
+]
+
+[project.urls]
+Homepage = "https://github.com/jhlr/Blocks"
+Repository = "https://github.com/jhlr/Blocks"
+Issues = "https://github.com/jhlr/Blocks/issues"
+
+[tool.hatch.version]
+path = "blocks/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["blocks"]
+
+[tool.hatch.build.targets.sdist]
+include = ["blocks", "README.md", "LICENSE", "pyproject.toml", "test_blocks.py"]

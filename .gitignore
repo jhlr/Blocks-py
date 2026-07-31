@@ -3,3 +3,11 @@ __pycache__/
 .DS_Store
 .vscode/
 soma_gerada.py
+
+# build / packaging artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+

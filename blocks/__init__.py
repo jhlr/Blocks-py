@@ -5,6 +5,8 @@ by parsing real Python or JavaScript source.
 """
 from __future__ import annotations
 
+__version__ = "0.1.0"
+
 from .operators import UNARY_OPS, BINARY_OPS, SHORTCIRCUIT_OPS
 from .errors import BlockReturn, LoopBreak, LoopContinue
 from . import nodes

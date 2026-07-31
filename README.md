@@ -1,4 +1,4 @@
-# Blocks-py
+# Blocks
 
 Uma pequena **DSL embarcada em Python** que você escreve como código Python normal,
 mas que constrói uma **AST** — e essa mesma árvore pode ser **interpretada**,
@@ -9,6 +9,19 @@ tradutor source-to-source (Python ↔ JavaScript, e daí pra Lua e Go).
 
 Pacote Python puro, sem dependências além da biblioteca padrão — um módulo por
 responsabilidade (veja [Estrutura](#estrutura)).
+
+## Instalação
+
+```bash
+pip install blocks-dsl        # a distribuição chama-se blocks-dsl; o import é `blocks`
+```
+
+Ou direto do fonte (é só stdlib):
+
+```bash
+git clone https://github.com/jhlr/Blocks && cd Blocks
+python -c "import blocks; print(blocks.__version__)"
+```
 
 ```python
 from blocks import Block
