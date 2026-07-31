@@ -219,6 +219,22 @@ class AssignNode(Node):
 
 
 @dataclass(slots=True)
+class SetIndexNode(Node):
+	"""Subscript assignment: obj[index] = value."""
+	obj: Expr
+	index: Expr
+	value: Expr
+
+
+@dataclass(slots=True)
+class SetAttrNode(Node):
+	"""Attribute assignment: obj.name = value."""
+	obj: Expr
+	name: str
+	value: Expr
+
+
+@dataclass(slots=True)
 class ExprNode(Node):
 	expr: Expr
 
@@ -372,6 +388,13 @@ def exec_nodes(nodes: List[Node], state: Dict[str, Any]) -> None:
 		if isinstance(node, AssignNode):
 			value = eval_expr(node.expr, state)
 			state[node.name] = value
+
+		elif isinstance(node, SetIndexNode):
+			obj = eval_expr(node.obj, state)
+			obj[eval_expr(node.index, state)] = eval_expr(node.value, state)
+
+		elif isinstance(node, SetAttrNode):
+			setattr(eval_expr(node.obj, state), node.name, eval_expr(node.value, state))
 
 		elif isinstance(node, ExprNode):
 			eval_expr(node.expr, state)
@@ -567,6 +590,18 @@ def _gen_nodes(nodes: List[Node], ctx: _CodegenContext) -> None:
 		if isinstance(node, AssignNode):
 			expr_src = _expr_to_source(node.expr)
 			ctx.add_line(f"state[{node.name!r}] = {expr_src}")
+
+		elif isinstance(node, SetIndexNode):
+			ctx.add_line(f"({_expr_to_source(node.obj)})[{_expr_to_source(node.index)}]"
+						 f" = {_expr_to_source(node.value)}")
+
+		elif isinstance(node, SetAttrNode):
+			obj_src = _expr_to_source(node.obj)
+			val_src = _expr_to_source(node.value)
+			if node.name.isidentifier():
+				ctx.add_line(f"({obj_src}).{node.name} = {val_src}")
+			else:
+				ctx.add_line(f"setattr({obj_src}, {node.name!r}, {val_src})")
 
 		elif isinstance(node, ExprNode):
 			expr_src = _expr_to_source(node.expr)
@@ -864,6 +899,18 @@ def _gen_js(nodes: List[Node], ctx: _CodegenContext) -> None:
 	for node in nodes:
 		if isinstance(node, AssignNode):
 			ctx.add_line(f"state[{json.dumps(node.name)}] = {_expr_to_js(node.expr)};")
+
+		elif isinstance(node, SetIndexNode):
+			ctx.add_line(f"({_expr_to_js(node.obj)})[{_expr_to_js(node.index)}]"
+						 f" = {_expr_to_js(node.value)};")
+
+		elif isinstance(node, SetAttrNode):
+			obj_src = _expr_to_js(node.obj)
+			val_src = _expr_to_js(node.value)
+			if node.name.isidentifier():
+				ctx.add_line(f"({obj_src}).{node.name} = {val_src};")
+			else:
+				ctx.add_line(f"({obj_src})[{json.dumps(node.name)}] = {val_src};")
 
 		elif isinstance(node, ExprNode):
 			ctx.add_line(f"{_expr_to_js(node.expr)};")
@@ -1196,6 +1243,15 @@ class Block:
 	def expr(self, value: Any) -> None:
 		self._body.append(ExprNode(to_expr(value)))
 
+	# lvalue assignment: obj[index] = value  /  obj.name = value
+	# (b.arr[i] = v can't be expressed via __setitem__ since the Expr has no
+	# reference to the Block, so these explicit methods are the builder API.)
+	def set_index(self, obj: Any, index: Any, value: Any) -> None:
+		self._body.append(SetIndexNode(to_expr(obj), to_expr(index), to_expr(value)))
+
+	def set_attr(self, obj: Any, name: str, value: Any) -> None:
+		self._body.append(SetAttrNode(to_expr(obj), name, to_expr(value)))
+
 	###########################################################################
 	# Execution
 	###########################################################################
@@ -1523,24 +1579,49 @@ def _lower_try(s: _ast.Try) -> TryNode:
 	return node
 
 
+def _lower_assign_target(tgt: _ast.expr, value: Expr) -> Node:
+	"""Build the assignment node for a target (name, subscript, or attribute)."""
+	if isinstance(tgt, _ast.Name):
+		return AssignNode(tgt.id, value)
+	if isinstance(tgt, _ast.Subscript):
+		if isinstance(tgt.slice, _ast.Slice):
+			raise UnsupportedSyntaxError(tgt, "slice assignment is not supported")
+		return SetIndexNode(_lower_expr(tgt.value), _lower_expr(tgt.slice), value)
+	if isinstance(tgt, _ast.Attribute):
+		return SetAttrNode(_lower_expr(tgt.value), tgt.attr, value)
+	raise UnsupportedSyntaxError(tgt, "unsupported assignment target (no tuple unpacking)")
+
+
 def _lower_stmt(s: _ast.stmt) -> List[Node]:
 	if isinstance(s, _ast.Assign):
 		if len(s.targets) != 1:
 			raise UnsupportedSyntaxError(s, "chained assignment (a = b = ...) is not supported")
-		tgt = s.targets[0]
-		if not isinstance(tgt, _ast.Name):
-			raise UnsupportedSyntaxError(
-				s, "only assignment to a simple name is supported (no x[i]=, x.a=, unpacking)")
-		return [AssignNode(tgt.id, _lower_expr(s.value))]
+		return [_lower_assign_target(s.targets[0], _lower_expr(s.value))]
 
 	if isinstance(s, _ast.AugAssign):
-		if not isinstance(s.target, _ast.Name):
-			raise UnsupportedSyntaxError(s, "augmented assignment target must be a simple name")
 		op = _AST_BINOP.get(type(s.op))
 		if op is None:
 			raise UnsupportedSyntaxError(s.op)
-		name = s.target.id
-		return [AssignNode(name, BinOpExpr(op, VarExpr(name), _lower_expr(s.value)))]
+		val = _lower_expr(s.value)
+		tgt = s.target
+		if isinstance(tgt, _ast.Name):
+			return [AssignNode(tgt.id, BinOpExpr(op, VarExpr(tgt.id), val))]
+		# x[i] += v / x.a += v : the target is read and written, so it must be
+		# side-effect-free (re-evaluated once each way).
+		if isinstance(tgt, _ast.Subscript):
+			if isinstance(tgt.slice, _ast.Slice):
+				raise UnsupportedSyntaxError(tgt, "slice assignment is not supported")
+			if not (_is_side_effect_free(tgt.value) and _is_side_effect_free(tgt.slice)):
+				raise UnsupportedSyntaxError(tgt, "augmented subscript assignment requires a side-effect-free target")
+			read = IndexExpr(_lower_expr(tgt.value), _lower_expr(tgt.slice))
+			return [SetIndexNode(_lower_expr(tgt.value), _lower_expr(tgt.slice),
+								 BinOpExpr(op, read, val))]
+		if isinstance(tgt, _ast.Attribute):
+			if not _is_side_effect_free(tgt.value):
+				raise UnsupportedSyntaxError(tgt, "augmented attribute assignment requires a side-effect-free target")
+			read = AttrExpr(_lower_expr(tgt.value), tgt.attr)
+			return [SetAttrNode(_lower_expr(tgt.value), tgt.attr, BinOpExpr(op, read, val))]
+		raise UnsupportedSyntaxError(tgt, "unsupported augmented assignment target")
 
 	if isinstance(s, _ast.AnnAssign):
 		if s.value is None:

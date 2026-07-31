@@ -212,6 +212,17 @@ def build_struct(x):
     mapping = {"lo": x, "hi": x * 10}
     return mapping["hi"] + pair[0]
 """, [{"x": 3}, {"x": 0}], True),
+
+	# v2: assignment to subscript targets, including augmented subscript assign.
+	("mutate_struct", """
+def mutate_struct(x):
+    arr = [0, 0, 0]
+    arr[1] = x * 10
+    d = {}
+    d["k"] = x + 1
+    arr[2] += x
+    return arr[1] + d["k"] + arr[2]
+""", [{"x": 5}, {"x": 0}], True),
 ]
 
 
