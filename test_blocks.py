@@ -223,6 +223,15 @@ def mutate_struct(x):
     arr[2] += x
     return arr[1] + d["k"] + arr[2]
 """, [{"x": 5}, {"x": 0}], True),
+
+	# and/or must short-circuit and return the operand (not a bool) in every
+	# backend — exercises the JS &&/|| and the Lua _and/_or helpers.
+	("logic", """
+def logic(a, b):
+    x = a and b
+    y = a or b
+    return [x, y]
+""", [{"a": 0, "b": 9}, {"a": 5, "b": 0}, {"a": "", "b": "x"}], True),
 ]
 
 
@@ -325,16 +334,76 @@ def _run_js_return(source: str, fn_name: str, argstate: Dict[str, Any]) -> Any:
 	return _run_js(source, fn_name, argstate).get("return")
 
 
+# Minimal JSON encoder appended to the Lua driver (Lua has no built-in JSON).
+# 0-indexed contiguous tables are emitted as arrays so list returns round-trip.
+_LUA_DUMP = r'''
+local function _is_array(t)
+  local n = 0
+  for _ in pairs(t) do n = n + 1 end
+  for i = 0, n - 1 do if t[i] == nil then return false, n end end
+  return true, n
+end
+local function _dump(v)
+  local ty = type(v)
+  if v == nil then return "null" end
+  if ty == "boolean" then return tostring(v) end
+  if ty == "number" then return tostring(v) end
+  if ty == "string" then return '"' .. v:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n') .. '"' end
+  if ty == "table" then
+    local arr, n = _is_array(v)
+    if arr then
+      local parts = {}
+      for i = 0, n - 1 do parts[#parts + 1] = _dump(v[i]) end
+      return "[" .. table.concat(parts, ",") .. "]"
+    end
+    local parts = {}
+    for k, val in pairs(v) do parts[#parts + 1] = '"' .. tostring(k) .. '":' .. _dump(val) end
+    return "{" .. table.concat(parts, ",") .. "}"
+  end
+  return "null"
+end
+'''
+
+
+def _run_lua_return(source: str, fn_name: str, argstate: Dict[str, Any]) -> Any:
+	"""Run compiled Lua under `lua` and return the parsed state['return']."""
+	from blocks import _lua_value  # reuse the value->Lua-literal renderer
+	driver = (source + _LUA_DUMP
+			  + f"\nlocal __r = {fn_name}({_lua_value(argstate)})"
+			  + '\nio.write(_dump(__r["return"]))\n')
+	with tempfile.NamedTemporaryFile("w", suffix=".lua", delete=False) as f:
+		f.write(driver)
+		tmp = f.name
+	proc = subprocess.run(["lua", tmp], capture_output=True, text=True, check=True)
+	return json.loads(proc.stdout)
+
+
+def _deep_eq(a: Any, b: Any) -> bool:
+	"""Value equality that treats ints and floats as equal (Lua `^` yields floats)."""
+	if isinstance(a, bool) or isinstance(b, bool):
+		return a is b
+	if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+		return a == b
+	if isinstance(a, list) and isinstance(b, list):
+		return len(a) == len(b) and all(_deep_eq(x, y) for x, y in zip(a, b))
+	if isinstance(a, dict) and isinstance(b, dict):
+		return a.keys() == b.keys() and all(_deep_eq(a[k], b[k]) for k in a)
+	return a == b
+
+
 def run_source() -> int:
 	"""Validate the Python front-end: real Python source through every backend."""
 	failures = 0
 	node = shutil.which("node")
+	lua = shutil.which("lua")
 	js_checked = 0
+	lua_checked = 0
 
 	for name, source, argstates, js_safe in SOURCE_CASES:
 		block = parse_python(source)
 		compiled, _ = block.compile(f"cf_{name}")
 		js_source = block.compile_js(f"cf_{name}") if (node and js_safe) else None
+		lua_source = block.compile_lua(f"cf_{name}") if (lua and js_safe) else None
 
 		# reference: the original Python, executed for real
 		real_ns: Dict[str, Any] = {}
@@ -343,24 +412,29 @@ def run_source() -> int:
 
 		for argstate in argstates:
 			expected = real_fn(**argstate)
-			got_interp = block(dict(argstate)).get("return")
-			got_compile = compiled(dict(argstate)).get("return")
-
-			results = {"real": expected, "interpret": got_interp, "compile": got_compile}
+			results = {
+				"interpret": block(dict(argstate)).get("return"),
+				"compile": compiled(dict(argstate)).get("return"),
+			}
 			if js_source is not None:
 				results["js"] = _run_js_return(js_source, f"cf_{name}", argstate)
+			if lua_source is not None:
+				results["lua"] = _run_lua_return(lua_source, f"cf_{name}", argstate)
 
-			distinct = {json.dumps(v, sort_keys=True) for v in results.values()}
-			if len(distinct) != 1:
+			bad = {k: v for k, v in results.items() if not _deep_eq(v, expected)}
+			if bad:
 				failures += 1
 				print(f"FAIL {name} on {argstate}")
+				print(f"  {'real':10}: {expected}")
 				for k, v in results.items():
 					print(f"  {k:10}: {v}")
 			else:
-				tag = "==".join(results.keys())
+				tag = "==".join(["real", *results.keys()])
 				print(f"ok   {name} {argstate} ({tag})")
 				if js_source is not None:
 					js_checked += 1
+				if lua_source is not None:
+					lua_checked += 1
 
 	total = sum(len(c[2]) for c in SOURCE_CASES)
 	if failures:
@@ -368,7 +442,7 @@ def run_source() -> int:
 	else:
 		print(f"\nall {total} source checks passed across {len(SOURCE_CASES)} "
 			  f"Python programs — parse -> interpret/compile matches real Python; "
-			  f"{js_checked} also verified against the JavaScript backend")
+			  f"{js_checked} verified against JavaScript, {lua_checked} against Lua")
 	return failures
 
 
