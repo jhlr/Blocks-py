@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from blocks import Block, parse_python
+from blocks import Block, parse_python, parse_js
 
 
 # Each case: (name, build_fn, list_of_argstates, js_safe).
@@ -378,6 +378,75 @@ def _run_lua_return(source: str, fn_name: str, argstate: Dict[str, Any]) -> Any:
 	return json.loads(proc.stdout)
 
 
+# ---------------------------------------------------------------------------
+# JS-source cases: parse REAL JavaScript -> Block, then check that interpreting
+# and compiling to Python match the ORIGINAL JavaScript run in node. This is the
+# JavaScript -> Python direction. Each case: (name, js_source, argstates).
+# Args are passed positionally (in key order) to the original JS function.
+# ---------------------------------------------------------------------------
+JS_SOURCE_CASES: List[Tuple[str, str, List[Dict[str, Any]]]] = [
+	("sumEvenOdd", """
+function sumEvenOdd(n, base = 0) {
+  let total = base;
+  for (let i = 1; i <= n; i++) {
+    if (i % 2 === 0) { total += i * 2; } else { total += i; }
+  }
+  return total;
+}
+""", [{"n": 5}, {"n": 6, "base": 100}, {"n": 0}]),
+
+	("countdown", """
+function countdown(n) {
+  let acc = 0, i = 0;
+  while (i < n) {
+    i += 1;
+    if (i === 3) { continue; }
+    if (i === 7) { break; }
+    acc += i;
+  }
+  return acc;
+}
+""", [{"n": 10}, {"n": 2}]),
+
+	("forOf", """
+function forOf(arr) {
+  let s = 0;
+  for (const x of arr) { s += x * 2; }
+  return s;
+}
+""", [{"arr": [1, 2, 3]}, {"arr": []}]),
+
+	("dictAccess", """
+function dictAccess(x) {
+  const d = {lo: x, hi: x * 10};
+  d["mid"] = x + 5;
+  return d.lo + d.hi + d["mid"];
+}
+""", [{"x": 3}, {"x": 0}]),
+
+	("logic", """
+function logic(a, b) {
+  return [a && b, a || b, !a];
+}
+""", [{"a": 0, "b": 9}, {"a": 5, "b": 0}]),
+
+	("power", "function power(a, b) { return a ** b; }", [{"a": 2, "b": 10}, {"a": 3, "b": 4}]),
+]
+
+
+def _run_node_reference(source: str, fn_name: str, argstate: Dict[str, Any]) -> Any:
+	"""Run the ORIGINAL JavaScript function in node with positional args."""
+	driver = (source
+			  + "\nconst __a = JSON.parse(process.argv[2]);"
+			  + f"\nconst __keys = Object.keys(__a);"
+			  + f"\nprocess.stdout.write(JSON.stringify({fn_name}(...__keys.map(k => __a[k]))));")
+	with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as f:
+		f.write(driver)
+		tmp = f.name
+	proc = subprocess.run(["node", tmp, json.dumps(argstate)], capture_output=True, text=True, check=True)
+	return json.loads(proc.stdout)
+
+
 def _deep_eq(a: Any, b: Any) -> bool:
 	"""Value equality that treats ints and floats as equal (Lua `^` yields floats)."""
 	if isinstance(a, bool) or isinstance(b, bool):
@@ -446,10 +515,48 @@ def run_source() -> int:
 	return failures
 
 
+def run_js_source() -> int:
+	"""Validate the JS front-end: real JavaScript -> Block matches node, Python."""
+	node = shutil.which("node")
+	if node is None:
+		print("note: `node` not found — skipping JavaScript front-end checks")
+		return 0
+
+	failures = 0
+	for name, source, argstates in JS_SOURCE_CASES:
+		block = parse_js(source)
+		compiled, _ = block.compile(f"cf_{name}")
+		for argstate in argstates:
+			expected = _run_node_reference(source, name, argstate)
+			results = {
+				"interpret": block(dict(argstate)).get("return"),
+				"py_compile": compiled(dict(argstate)).get("return"),
+			}
+			bad = {k: v for k, v in results.items() if not _deep_eq(v, expected)}
+			if bad:
+				failures += 1
+				print(f"FAIL {name} on {argstate}")
+				print(f"  {'node(js)':12}: {expected}")
+				for k, v in results.items():
+					print(f"  {k:12}: {v}")
+			else:
+				print(f"ok   {name} {argstate} (node(js)==interpret==py_compile)")
+
+	total = sum(len(c[2]) for c in JS_SOURCE_CASES)
+	if failures:
+		print(f"\n{failures} JS-source divergence(s) detected")
+	else:
+		print(f"\nall {total} JS-source checks passed across {len(JS_SOURCE_CASES)} "
+			  f"JavaScript programs — parse_js -> interpret/compile matches node")
+	return failures
+
+
 if __name__ == "__main__":
 	import sys
 	print("=== AST-level: builder vs backends ===")
 	f1 = run()
 	print("\n=== Source-level: real Python -> backends ===")
 	f2 = run_source()
-	sys.exit(1 if (f1 + f2) else 0)
+	print("\n=== JS front-end: real JavaScript -> Python ===")
+	f3 = run_js_source()
+	sys.exit(1 if (f1 + f2 + f3) else 0)
