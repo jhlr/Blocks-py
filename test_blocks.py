@@ -402,6 +402,16 @@ def _run_lua_return(source: str, fn_name: str, argstate: Dict[str, Any]) -> Any:
 	return json.loads(proc.stdout)
 
 
+def _run_go_return(source: str, argstate: Dict[str, Any]) -> Any:
+	"""Run compiled Go (a runnable program) and return the parsed state['return']."""
+	with tempfile.NamedTemporaryFile("w", suffix=".go", delete=False) as f:
+		f.write(source)
+		tmp = f.name
+	proc = subprocess.run(["go", "run", tmp, json.dumps(argstate)],
+						  capture_output=True, text=True, check=True)
+	return json.loads(proc.stdout)
+
+
 # ---------------------------------------------------------------------------
 # JS-source cases: parse REAL JavaScript -> Block, then check that interpreting
 # and compiling to Python match the ORIGINAL JavaScript run in node. This is the
@@ -506,14 +516,15 @@ def run_source() -> int:
 	failures = 0
 	node = shutil.which("node")
 	lua = shutil.which("lua")
-	js_checked = 0
-	lua_checked = 0
+	go = shutil.which("go")
+	js_checked = lua_checked = go_checked = 0
 
 	for name, source, argstates, js_safe in SOURCE_CASES:
 		block = parse_python(source)
 		compiled, _ = block.compile(f"cf_{name}")
 		js_source = block.compile_js(f"cf_{name}") if (node and js_safe) else None
 		lua_source = block.compile_lua(f"cf_{name}") if (lua and js_safe) else None
+		go_source = block.compile_go(f"cf_{name}") if (go and js_safe) else None
 
 		# reference: the original Python, executed for real
 		real_ns: Dict[str, Any] = {}
@@ -530,6 +541,8 @@ def run_source() -> int:
 				results["js"] = _run_js_return(js_source, f"cf_{name}", argstate)
 			if lua_source is not None:
 				results["lua"] = _run_lua_return(lua_source, f"cf_{name}", argstate)
+			if go_source is not None:
+				results["go"] = _run_go_return(go_source, argstate)
 
 			bad = {k: v for k, v in results.items() if not _deep_eq(v, expected)}
 			if bad:
@@ -545,6 +558,8 @@ def run_source() -> int:
 					js_checked += 1
 				if lua_source is not None:
 					lua_checked += 1
+				if go_source is not None:
+					go_checked += 1
 
 	total = sum(len(c[2]) for c in SOURCE_CASES)
 	if failures:
@@ -552,7 +567,8 @@ def run_source() -> int:
 	else:
 		print(f"\nall {total} source checks passed across {len(SOURCE_CASES)} "
 			  f"Python programs — parse -> interpret/compile matches real Python; "
-			  f"{js_checked} verified against JavaScript, {lua_checked} against Lua")
+			  f"{js_checked} verified against JavaScript, {lua_checked} against Lua, "
+			  f"{go_checked} against Go")
 	return failures
 
 

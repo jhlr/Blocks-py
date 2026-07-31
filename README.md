@@ -3,9 +3,9 @@
 Uma pequena **DSL embarcada em Python** que você escreve como código Python normal,
 mas que constrói uma **AST** — e essa mesma árvore pode ser **interpretada**,
 **compilada em uma função Python**, **exportada como um `.py` autônomo** ou
-**compilada para JavaScript e Lua**. E dá pra chegar nessa árvore também
+**compilada para JavaScript, Lua e Go**. E dá pra chegar nessa árvore também
 **parseando Python OU JavaScript de verdade** — o que faz do Blocks um pequeno
-tradutor source-to-source (Python ↔ JavaScript, e daí pra Lua).
+tradutor source-to-source (Python ↔ JavaScript, e daí pra Lua e Go).
 
 Um arquivo, sem dependências além da biblioteca padrão.
 
@@ -29,7 +29,7 @@ fazer com ela.
 Se preferir não usar o builder, dá pra **parsear Python de verdade** direto pra
 mesma árvore (veja "Front-end" abaixo) — inclusive traduzindo Python → JavaScript.
 
-## Cinco modos, o mesmo programa
+## Seis modos, o mesmo programa
 
 ```python
 # 1) Interpretar (tree-walking)
@@ -51,6 +51,10 @@ b.export_js("soma.js", fn_name="soma")   # módulo CommonJS autônomo (Node/brow
 # 5) Compilar / exportar para Lua (mesma AST, backend Lua)
 lua = b.compile_lua("soma")
 b.export_lua("soma.lua", fn_name="soma")   # módulo Lua autônomo
+
+# 6) Compilar / exportar para Go (mesma AST, backend Go)
+go = b.compile_go("soma")                  # programa Go runnable (go run)
+b.export_go("soma.go", fn_name="soma")     # lê JSON argstate do argv, imprime JSON
 ```
 
 ## Front-ends: Python E JavaScript de verdade → AST
@@ -143,17 +147,17 @@ de `true`/`None` diferem na capitalização dentro de interpolação; truthiness
 - **AST tipada** — expressões (`Expr`) e comandos (`Node`) como `dataclass`es com `slots`.
 - **Interpretador** — `eval_expr` / `exec_nodes`, com controle de fluxo por exceções
   internas (`BlockReturn`, `LoopBreak`, `LoopContinue`).
-- **Três geradores de código (Python, JavaScript, Lua)** — percorrem a mesma
-  árvore e emitem código-fonte indentado, preservando a semântica do
+- **Quatro geradores de código (Python, JavaScript, Lua, Go)** — percorrem a
+  mesma árvore e emitem código-fonte, preservando a semântica do
   `try/except/finally` (o `finally` roda antes de propagar return/break e também
-  quando a exceção é tratada; em JS/Lua isso cai no `finally`/pcall nativo).
+  quando a exceção é tratada; em JS/Lua/Go isso cai no `finally`/pcall/recover).
 - **Fonte única de semântica** — o significado de cada operador vive em UMA
   tabela (`UNARY_OPS` / `BINARY_OPS` / `SHORTCIRCUIT_OPS`,
   `op → (símbolo Python, função, símbolo JS, símbolo Lua)`) lida pelo
-  interpretador e pelos três geradores. Adicionar um operador é adicionar uma
-  linha. `test_blocks.py` é um harness *golden* que roda os mesmos programas nos
-  backends e falha se divergirem — inclusive rodando o JS no `node` e o Lua no
-  `lua` e comparando com o interpretador Python. Garantia anti-drift
+  interpretador e pelos geradores. Adicionar um operador é adicionar uma linha.
+  `test_blocks.py` é um harness *golden* que roda os mesmos programas nos backends
+  e falha se divergirem — rodando o JS no `node`, o Lua no `lua` e o Go via
+  `go run`, comparando com o interpretador Python. Garantia anti-drift
   cross-linguagem.
 
 ## Semântica
@@ -209,6 +213,24 @@ Também dinâmico, mas com diferenças que exigem helpers pra manter fidelidade:
   não compila pra Lua (fronteira do pcall) → `LuaUnsupportedError`. Tipos de
   exceção e divisão por zero seguem específicos da linguagem, como no JS.
 
+## Backend Go
+
+Go é **estaticamente tipado**, então o backend carrega todo valor como `any`
+(`interface{}`) e gera um **runtime dinâmico** de helpers que reproduz a semântica
+do Python — não é tipagem estática falsa, é um mini-interpretador de operações:
+
+- `_add`/`_sub`/`_mul`/… fazem *type-switch* em `int`/`float64`/`string`; `_div`
+  sempre retorna float (Python `/`); `_mod` é o módulo com sinal do divisor; `_pow`
+  dá `int` pra base/exp inteiros.
+- `_truthy` (0/""/[]/{} falsy, fiel ao Python) governa `if`/`while`; `_and`/`_or`/
+  `_cond` recebem *thunks* (short-circuit + retorno do operando).
+- `_index`/`_setindex`/`_slice` operam em `[]any` e `map[string]any` (chaves de dict
+  viram string); `_slice` porta a semântica exata do Python.
+- `compile_go` emite um **programa runnable** (`package main`): lê um argstate JSON
+  de `os.Args[1]` e imprime o JSON de `state["return"]`.
+- Divergências como no JS/Lua (tipos de exceção, `/0`, `str()` de bool/None);
+  atributo/`SetAttr` e controle escapando de `try` levantam `GoUnsupportedError`.
+
 ## Testes
 
 ```bash
@@ -218,13 +240,14 @@ python test_blocks.py   # sem deps. Três níveis:
                         #     comparado ao Python REAL executado (exec)
                         #  3) JS-source: parse_js -> interpretar/compilar comparado
                         #     ao JavaScript REAL rodado no node
-                        # Onde `node`/`lua` existirem, o JS e o Lua gerados também
-                        # rodam e são comparados. Sai != 0 se algum backend divergir.
+                        # Onde `node`/`lua`/`go` existirem, o JS, o Lua e o Go
+                        # gerados também rodam e são comparados. Sai != 0 se algum
+                        # backend divergir.
 ```
 
-Os runtimes `node` (JS) e `lua` (Lua) são **opcionais** — se ausentes, os
-cross-checks correspondentes são pulados com aviso; o resto da suíte roda só com
-Python da stdlib.
+Os runtimes `node` (JS), `lua` (Lua) e `go` (Go) são **opcionais** — se ausentes,
+os cross-checks correspondentes são pulados com aviso; o resto da suíte roda só
+com Python da stdlib.
 
 ## Fora do escopo (por ora)
 
