@@ -7,7 +7,8 @@ mas que constrói uma **AST** — e essa mesma árvore pode ser **interpretada**
 **parseando Python OU JavaScript de verdade** — o que faz do Blocks um pequeno
 tradutor source-to-source (Python ↔ JavaScript, e daí pra Lua e Go).
 
-Um arquivo, sem dependências além da biblioteca padrão.
+Pacote Python puro, sem dependências além da biblioteca padrão — um módulo por
+responsabilidade (veja [Estrutura](#estrutura)).
 
 ```python
 from blocks import Block
@@ -255,10 +256,27 @@ Definição de função aninhada / closures. É outra categoria de linguagem
 (escopo léxico) e inflaria o DSL; para "chamar código de verdade" já existe
 `.call()` sobre qualquer callable no `state`.
 
+## Estrutura
+
+Pacote `blocks/`, um módulo por responsabilidade, com dependências em DAG (sem
+ciclos):
+
+| Módulo | Papel |
+| --- | --- |
+| `operators.py` | tabela única de operadores (símbolos Python/JS/Lua + função) |
+| `errors.py` | exceções de controle de fluxo (`BlockReturn`/`LoopBreak`/`LoopContinue`) |
+| `nodes.py` | AST (`Expr`/`Node` + subclasses) e `to_expr` |
+| `interpreter.py` | `eval_expr` / `exec_nodes` (tree-walking) |
+| `codegen_base.py` | `_CodegenContext` + detectores de escape compartilhados |
+| `codegen_py.py` / `codegen_js.py` / `codegen_lua.py` / `codegen_go.py` | um gerador por alvo |
+| `builder.py` | `Block` (builder simbólico + `compile`/`export_*`) |
+| `parse_python.py` / `parse_js.py` | front-ends de Python e JavaScript |
+| `__init__.py` | reexporta a API pública |
+
 ## Requisitos
 
 Python 3.10+ (usa `dataclass(slots=True)`). Sem dependências externas. Os
-cross-checks de teste usam `node` e `lua` se disponíveis (opcionais).
+cross-checks de teste usam `node`, `lua` e `go` se disponíveis (opcionais).
 
 ## Licença
 
